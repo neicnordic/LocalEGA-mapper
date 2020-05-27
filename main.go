@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"encoding/json"
 	_ "github.com/lib/pq"
@@ -11,26 +12,38 @@ import (
 )
 
 type Mapping struct {
-	FileId    string `json:"fileId"`
+	StableId  string `json:"stableId"`
 	DatasetId string `json:"datasetId"`
 }
 
+const defaultQueueName = "mappings"
+
+var dbIn *sql.DB
+var dbOut *sql.DB
 var mappingMutex sync.Mutex
 
 func main() {
-	db, err := sql.Open("postgres", os.Getenv("DB_CONNECTION"))
-	failOnError(err, "Failed to connect to PostgreSQL")
-	defer db.Close()
+	var err error
 
-	mq, err := amqp.Dial(os.Getenv("MQ_CONNECTION"))
+	dbIn, err = sql.Open("postgres", os.Getenv("DB_IN_CONNECTION"))
+	failOnError(err, "Failed to connect to DB")
+
+	dbOut, err = sql.Open("postgres", os.Getenv("DB_OUT_CONNECTION"))
+	failOnError(err, "Failed to connect to DB")
+
+	mq, err := amqp.DialTLS(os.Getenv("MQ_CONNECTION"), getTLSConfig())
 	failOnError(err, "Failed to connect to RabbitMQ")
-	defer mq.Close()
 
 	channel, err := mq.Channel()
 	failOnError(err, "Failed to create RabbitMQ channel")
 
+	queueName := os.Getenv("QUEUE_NAME")
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
 	deliveries, err := channel.Consume(
-		os.Getenv("QUEUE_NAME"),
+		queueName,
 		"",
 		true,
 		false,
@@ -43,13 +56,11 @@ func main() {
 	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
 
 	for delivery := range deliveries {
-		transaction, err := db.Begin()
-		failOnError(err, "Failed to begin transaction")
-		processDelivery(delivery, transaction)
+		processDelivery(delivery)
 	}
 }
 
-func processDelivery(delivery amqp.Delivery, transaction *sql.Tx) {
+func processDelivery(delivery amqp.Delivery) {
 	mappingMutex.Lock()
 	defer mappingMutex.Unlock()
 
@@ -57,15 +68,20 @@ func processDelivery(delivery amqp.Delivery, transaction *sql.Tx) {
 	err := json.Unmarshal(delivery.Body, &mappings)
 	if err != nil {
 		log.Printf("%s: %s", "Failed to parse incoming message", err)
-		err := transaction.Rollback()
-		failOnError(err, "Failed to rollback transaction")
 		return
 	}
 
+	transaction, err := dbOut.Begin()
+	failOnError(err, "Failed to begin transaction")
+
 	for _, mapping := range mappings {
-		_, err := transaction.Exec(
+		stableId := mapping.StableId
+		fileId, err := selectFileIdByStableId(stableId)
+		failOnError(err, "Failed to select fileId by stableId: "+stableId)
+
+		_, err = transaction.Exec(
 			"insert into local_ega_ebi.filedataset (file_id, dataset_stable_id) values ($1, $2)",
-			mapping.FileId,
+			fileId,
 			mapping.DatasetId,
 		)
 		failOnError(err, "Failed to insert mapping")
@@ -73,6 +89,23 @@ func processDelivery(delivery amqp.Delivery, transaction *sql.Tx) {
 
 	err = transaction.Commit()
 	failOnError(err, "Failed to commit transaction")
+
+	log.Printf("Mappings stored: %v", mappings)
+}
+
+func selectFileIdByStableId(stableId string) (fileId int, err error) {
+	err = dbIn.QueryRow("select id from local_ega.files where stable_id = $1", stableId).Scan(&fileId)
+	return
+}
+
+func getTLSConfig() *tls.Config {
+	tlsConfig := tls.Config{}
+	if os.Getenv("VERIFY_CERT") == "true" {
+		tlsConfig.InsecureSkipVerify = false
+	} else {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	return &tlsConfig
 }
 
 func failOnError(err error, msg string) {
