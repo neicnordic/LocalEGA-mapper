@@ -1,3 +1,4 @@
+// Package main contains the main logic of the "mapper" microservice.
 package main
 
 import (
@@ -11,7 +12,7 @@ import (
 	"sync"
 )
 
-type Mapping struct {
+type mapping struct {
 	StableId  string `json:"stableId"`
 	DatasetId string `json:"datasetId"`
 }
@@ -64,7 +65,7 @@ func processDelivery(delivery amqp.Delivery) {
 	mappingMutex.Lock()
 	defer mappingMutex.Unlock()
 
-	var mappings []Mapping
+	var mappings []mapping
 	err := json.Unmarshal(delivery.Body, &mappings)
 	if err != nil {
 		log.Printf("%s: %s", "Failed to parse incoming message", err)
