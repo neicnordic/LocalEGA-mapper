@@ -7,12 +7,14 @@ COPY . .
 
 RUN go build
 
-FROM alpine:latest
+RUN echo "nobody:x:65534:65534:nobody:/:/sbin/nologin" > passwd
+
+FROM scratch
+
+COPY --from=builder /go/passwd /etc/passwd
 
 COPY --from=builder /go/sda-mapper ./sda-mapper
 
-RUN addgroup -g 1000 lega && adduser -D -u 1000 -G lega lega
-
-USER 1000
+USER 65534
 
 ENTRYPOINT [ "/sda-mapper" ]
