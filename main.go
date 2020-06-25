@@ -13,8 +13,9 @@ import (
 )
 
 type mapping struct {
-	StableId  string `json:"stableId"`
-	DatasetId string `json:"datasetId"`
+	Type         string   `json:"type"`
+	DatasetID    string   `json:"dataset_id"`
+	AccessionIDs []string `json:"accession_ids"`
 }
 
 const defaultQueueName = "mappings"
@@ -65,8 +66,8 @@ func processDelivery(delivery amqp.Delivery) {
 	mappingMutex.Lock()
 	defer mappingMutex.Unlock()
 
-	var mappings []mapping
-	err := json.Unmarshal(delivery.Body, &mappings)
+	var mapping mapping
+	err := json.Unmarshal(delivery.Body, &mapping)
 	if err != nil {
 		log.Printf("%s: %s", "Failed to parse incoming message", err)
 		return
@@ -75,15 +76,14 @@ func processDelivery(delivery amqp.Delivery) {
 	transaction, err := dbOut.Begin()
 	failOnError(err, "Failed to begin transaction")
 
-	for _, mapping := range mappings {
-		stableId := mapping.StableId
-		fileId, err := selectFileIdByStableId(stableId)
-		failOnError(err, "Failed to select fileId by stableId: "+stableId)
+	for _, stableID := range mapping.AccessionIDs {
+		fileId, err := selectFileIdByStableId(stableID)
+		failOnError(err, "Failed to select fileId by stableId: "+stableID)
 
 		_, err = transaction.Exec(
 			"insert into local_ega_ebi.filedataset (file_id, dataset_stable_id) values ($1, $2)",
 			fileId,
-			mapping.DatasetId,
+			mapping.DatasetID,
 		)
 		failOnError(err, "Failed to insert mapping")
 	}
@@ -91,7 +91,7 @@ func processDelivery(delivery amqp.Delivery) {
 	err = transaction.Commit()
 	failOnError(err, "Failed to commit transaction")
 
-	log.Printf("Mappings stored: %v", mappings)
+	log.Printf("Mapping stored: %v", mapping)
 }
 
 func selectFileIdByStableId(stableId string) (fileId int, err error) {
